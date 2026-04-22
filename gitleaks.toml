@@ -1,0 +1,48 @@
+# ─────────────────────────────────────────────────────────────────
+# .gitleaks.toml - Configuration Gitleaks
+# ─────────────────────────────────────────────────────────────────
+
+title = "DevSecOps Gitleaks Config"
+
+[extend]
+useDefault = true
+
+[[rules]]
+id = "harbor-password"
+description = "Harbor Registry Password"
+regex = '''(?i)(harbor.{0,10}(password|passwd|pwd).{0,5}=.{0,5}['"]?[a-zA-Z0-9+/]{8,}['"]?)'''
+severity = "CRITICAL"
+
+[[rules]]
+id = "cosign-private-key"
+description = "Cosign Private Key"
+regex = '''-----BEGIN (ENCRYPTED )?COSIGN PRIVATE KEY-----'''
+severity = "CRITICAL"
+
+[[rules]]
+id = "gitlab-token"
+description = "GitLab Personal Access Token"
+regex = '''glpat-[0-9a-zA-Z\-\_]{20}'''
+severity = "CRITICAL"
+
+[[rules]]
+id = "jwt-token"
+description = "JWT Token"
+regex = '''eyJ[A-Za-z0-9_\-]{10,}\.[A-Za-z0-9_\-]{10,}\.[A-Za-z0-9_\-]{10,}'''
+severity = "HIGH"
+
+[allowlist]
+paths = [
+    ".gitleaks.toml",
+    "tests/",
+    "docs/",
+    ".env.example",
+    "README.md",
+]
+stopwords = [
+    "example",
+    "placeholder",
+    "changeme",
+    "your-secret",
+    "CHANGER_MOI",
+]

@@ -1,0 +1,34 @@
+# ─── Secrets (JAMAIS commiter) ───────────────────────────────────
+.env.secrets
+*.key
+*.pem
+cosign.key
+cosign.pub
+
+# ─── Rapports générés par Jenkins ────────────────────────────────
+security-reports/
+dependency-check-report/
+coverage.xml
+test-results.xml
+.coverage
+
+# ─── Python ──────────────────────────────────────────────────────
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+dist/
+build/
+*.egg-info/
+
+# ─── Docker ──────────────────────────────────────────────────────
+*.tar.gz
+
+# ─── IDE ─────────────────────────────────────────────────────────
+.vscode/
+.idea/
+*.swp
+
+# ─── OS ──────────────────────────────────────────────────────────
+.DS_Store
+Thumbs.db

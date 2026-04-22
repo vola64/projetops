@@ -1,0 +1,139 @@
+version: '3.8'
+
+# ═══════════════════════════════════════════════════════════════════
+#  Docker Compose - Déploiement sécurisé Production
+#  Les secrets sont injectés via variables d'environnement CI/CD
+#  ⚠️  Ne jamais committer de valeurs sensibles ici
+# ═══════════════════════════════════════════════════════════════════
+
+services:
+
+  # ─── Application FastAPI ────────────────────────────────────────
+  app:
+    image: ${HARBOR_REGISTRY}/fastapi-app:${IMAGE_TAG:-latest}
+    container_name: devsecops-app
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:8000:8000"
+    environment:
+      - ENV=production
+      - APP_VERSION=${IMAGE_TAG:-unknown}
+      - ALLOWED_ORIGINS=${ALLOWED_ORIGINS:-https://mondomaine.com}
+    env_file:
+      - .env.secrets
+    networks:
+      - app-network
+    read_only: true
+    tmpfs:
+      - /tmp:size=50m
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    cap_add:
+      - NET_BIND_SERVICE
+    mem_limit: 512m
+    cpus: '0.5'
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  # ─── Nginx - Reverse Proxy TLS ──────────────────────────────────
+  nginx:
+    image: nginx:1.25-alpine
+    container_name: devsecops-nginx
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./nginx/ssl:/etc/nginx/ssl:ro
+    networks:
+      - app-network
+    depends_on:
+      app:
+        condition: service_healthy
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    cap_add:
+      - NET_BIND_SERVICE
+      - CHOWN
+      - SETUID
+      - SETGID
+    mem_limit: 128m
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  # ─── Prometheus (optionnel) ─────────────────────────────────────
+  prometheus:
+    image: prom/prometheus:v2.52.0
+    container_name: devsecops-prometheus
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:9090:9090"
+    volumes:
+      - ./monitoring/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./monitoring/alerts.yml:/etc/prometheus/alerts.yml:ro
+      - prometheus-data:/prometheus
+    networks:
+      - monitoring-network
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.retention.time=15d'
+    security_opt:
+      - no-new-privileges:true
+    mem_limit: 256m
+    profiles:
+      - monitoring
+
+  # ─── Grafana (optionnel) ────────────────────────────────────────
+  grafana:
+    image: grafana/grafana:10.4.2
+    container_name: devsecops-grafana
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:3000:3000"
+    volumes:
+      - grafana-data:/var/lib/grafana
+      - ./monitoring/grafana/provisioning:/etc/grafana/provisioning:ro
+    environment:
+      - GF_SECURITY_ADMIN_PASSWORD=${GRAFANA_PASSWORD}
+      - GF_SECURITY_DISABLE_GRAVATAR=true
+      - GF_ANALYTICS_REPORTING_ENABLED=false
+      - GF_USERS_ALLOW_SIGN_UP=false
+    networks:
+      - monitoring-network
+    depends_on:
+      - prometheus
+    security_opt:
+      - no-new-privileges:true
+    mem_limit: 256m
+    profiles:
+      - monitoring
+
+networks:
+  app-network:
+    driver: bridge
+  monitoring-network:
+    driver: bridge
+    internal: true
+
+volumes:
+  prometheus-data:
+    driver: local
+  grafana-data:
+    driver: local
