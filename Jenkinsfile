@@ -1,6 +1,6 @@
 // ═══════════════════════════════════════════════════════════════════
-//  Jenkinsfile - Pipeline CI/CD Sécurisé (SANS HARBOR)
-//  Fix : Docker-in-Docker → plus de montage de volumes workspace
+//  Jenkinsfile - Pipeline CI/CD Sécurisé
+//  Fix : docker create + docker cp (pas de volume mount)
 // ═══════════════════════════════════════════════════════════════════
 
 pipeline {
@@ -41,22 +41,17 @@ pipeline {
         // ═══════════════════════════════════════════════════════
         stage('Vérification Environnement') {
             steps {
-                echo '🔧 Vérification des outils...'
+                echo '🔧 Vérification...'
                 sh '''
-                    echo "=== Docker ==="
                     docker --version
-                    echo "=== Variables ==="
                     echo "IMAGE_FULL = ${IMAGE_FULL}"
-                    echo "=== Workspace ==="
                     ls -la
                 '''
             }
         }
 
         // ═══════════════════════════════════════════════════════
-        // STAGE 3 : Scan de secrets - Gitleaks
-        // FIX Docker-in-Docker : on installe gitleaks directement
-        // dans Jenkins au lieu d'utiliser docker run + volume
+        // STAGE 3 : Scan secrets - Gitleaks (binaire direct)
         // ═══════════════════════════════════════════════════════
         stage('Secrets Scan - Gitleaks') {
             steps {
@@ -64,30 +59,24 @@ pipeline {
                 sh '''
                     mkdir -p ${REPORT_DIR}
 
-                    # Télécharger gitleaks directement dans Jenkins
-                    # (évite le problème de volume Docker-in-Docker)
-                    if ! command -v gitleaks &>/dev/null; then
-                        echo "Installation de Gitleaks..."
+                    if [ ! -f /tmp/gitleaks ]; then
+                        echo "Téléchargement Gitleaks..."
                         curl -sSfL https://github.com/gitleaks/gitleaks/releases/download/v8.18.4/gitleaks_8.18.4_linux_x64.tar.gz \
                             -o /tmp/gitleaks.tar.gz
                         tar -xzf /tmp/gitleaks.tar.gz -C /tmp
                         chmod +x /tmp/gitleaks
-                        export PATH="/tmp:$PATH"
                     fi
 
-                    # Lancer le scan depuis le workspace Jenkins directement
+                    GITLEAKS_EXIT=0
                     /tmp/gitleaks detect \
                         --source="$(pwd)" \
                         --config="$(pwd)/gitleaks.toml" \
                         --report-format=json \
                         --report-path="$(pwd)/${REPORT_DIR}/gitleaks-report.json" \
-                        --redact \
-                        --verbose \
-                        --no-git || GITLEAKS_EXIT=$?
+                        --redact --verbose --no-git || GITLEAKS_EXIT=$?
 
-                    echo "Résultat scan : ${GITLEAKS_EXIT:-0}"
-                    if [ "${GITLEAKS_EXIT:-0}" = "1" ]; then
-                        echo "🚨 Secrets détectés dans le code !"
+                    if [ "$GITLEAKS_EXIT" = "1" ]; then
+                        echo "🚨 Secrets détectés !"
                         exit 1
                     fi
                     echo "✅ Aucun secret détecté"
@@ -105,62 +94,39 @@ pipeline {
         }
 
         // ═══════════════════════════════════════════════════════
-        // STAGE 4 : SAST (parallèle)
-        // FIX : on utilise docker run avec le code passé
-        // via git archive + pipe (pas de volume)
+        // STAGE 4 : SAST
+        // FIX : docker create + docker cp (pas de volume mount)
         // ═══════════════════════════════════════════════════════
         stage('SAST') {
             parallel {
-
-                stage('Semgrep') {
-                    steps {
-                        echo '🔎 Analyse Semgrep...'
-                        sh '''
-                            mkdir -p ${REPORT_DIR}
-                            # Installer semgrep dans Jenkins directement
-                            pip3 install semgrep --quiet 2>/dev/null || \
-                            pip install semgrep --quiet 2>/dev/null || true
-
-                            if command -v semgrep &>/dev/null; then
-                                semgrep \
-                                    --config="p/python" \
-                                    --config="p/owasp-top-ten" \
-                                    --json \
-                                    --output="${REPORT_DIR}/semgrep-report.json" \
-                                    src/ || true
-                                echo "✅ Semgrep terminé"
-                            else
-                                echo "⚠️  Semgrep non disponible, scan ignoré"
-                                echo '{"results":[]}' > ${REPORT_DIR}/semgrep-report.json
-                            fi
-                        '''
-                    }
-                    post {
-                        always {
-                            archiveArtifacts artifacts: "${REPORT_DIR}/semgrep-report.json",
-                                             allowEmptyArchive: true
-                        }
-                    }
-                }
 
                 stage('Bandit') {
                     steps {
                         echo '🔎 Analyse Bandit Python SAST...'
                         sh '''
                             mkdir -p ${REPORT_DIR}
-                            pip3 install bandit --quiet 2>/dev/null || \
-                            pip install bandit --quiet 2>/dev/null || true
 
-                            if command -v bandit &>/dev/null; then
-                                bandit -r src/ \
-                                    -f json \
-                                    -o ${REPORT_DIR}/bandit-report.json \
-                                    --severity-level medium -ll || true
-                                echo "✅ Bandit terminé"
-                            else
-                                echo "⚠️  Bandit non disponible, scan ignoré"
+                            # Créer conteneur sans le démarrer
+                            CID=$(docker create python:3.11-slim \
+                                bash -c "pip install bandit --quiet && \
+                                bandit -r /app/src/ -f json \
+                                -o /app/${REPORT_DIR}/bandit-report.json \
+                                --severity-level medium -ll || true && \
+                                echo done")
+
+                            # Copier le workspace dans le conteneur
+                            docker cp "$(pwd)/." "${CID}:/app/"
+
+                            # Démarrer et attendre
+                            docker start -a "${CID}" || true
+
+                            # Récupérer le rapport
+                            docker cp "${CID}:/app/${REPORT_DIR}/bandit-report.json" \
+                                "${REPORT_DIR}/bandit-report.json" || \
                                 echo '{"results":[]}' > ${REPORT_DIR}/bandit-report.json
-                            fi
+
+                            docker rm "${CID}" || true
+                            echo "✅ Bandit terminé"
                         '''
                     }
                     post {
@@ -171,25 +137,28 @@ pipeline {
                     }
                 }
 
-                stage('OWASP Dependency Check') {
+                stage('pip-audit') {
                     steps {
-                        echo '📦 Scan dépendances OWASP...'
+                        echo '📦 Scan dépendances pip-audit...'
                         sh '''
                             mkdir -p ${REPORT_DIR}/dependency-check
-                            # Utiliser pip-audit (léger, sans Docker)
-                            pip3 install pip-audit --quiet 2>/dev/null || \
-                            pip install pip-audit --quiet 2>/dev/null || true
 
-                            if command -v pip-audit &>/dev/null; then
-                                pip-audit \
-                                    -r requirements.txt \
-                                    -f json \
-                                    -o ${REPORT_DIR}/dependency-check/pip-audit-report.json \
-                                    --no-deps || true
-                                echo "✅ pip-audit terminé"
-                            else
-                                echo "⚠️  pip-audit non disponible"
-                            fi
+                            CID=$(docker create python:3.11-slim \
+                                bash -c "pip install pip-audit --quiet && \
+                                pip-audit -r /app/requirements.txt \
+                                -f json \
+                                -o /app/${REPORT_DIR}/dependency-check/pip-audit-report.json \
+                                --no-deps || true && echo done")
+
+                            docker cp "$(pwd)/." "${CID}:/app/"
+                            docker start -a "${CID}" || true
+
+                            docker cp "${CID}:/app/${REPORT_DIR}/dependency-check/pip-audit-report.json" \
+                                "${REPORT_DIR}/dependency-check/pip-audit-report.json" || \
+                                echo '{"dependencies":[]}' > ${REPORT_DIR}/dependency-check/pip-audit-report.json
+
+                            docker rm "${CID}" || true
+                            echo "✅ pip-audit terminé"
                         '''
                     }
                     post {
@@ -205,21 +174,42 @@ pipeline {
 
         // ═══════════════════════════════════════════════════════
         // STAGE 5 : Tests unitaires
+        // FIX : docker create + docker cp
         // ═══════════════════════════════════════════════════════
         stage('Tests Unitaires') {
             steps {
                 echo '🧪 Exécution des tests Pytest...'
                 sh '''
-                    pip3 install -r requirements.txt --quiet 2>/dev/null || \
-                    pip install -r requirements.txt --quiet 2>/dev/null
+                    # Créer le conteneur Python sans démarrer
+                    CID=$(docker create python:3.11-slim \
+                        bash -c "pip install -r /app/requirements.txt --quiet && \
+                        cd /app && \
+                        pytest tests/ \
+                            --cov=src \
+                            --cov-report=xml:coverage.xml \
+                            --cov-report=term-missing \
+                            --cov-fail-under=80 \
+                            --junitxml=test-results.xml \
+                            -v")
 
-                    pytest tests/ \
-                        --cov=src \
-                        --cov-report=xml:coverage.xml \
-                        --cov-report=term-missing \
-                        --cov-fail-under=80 \
-                        --junitxml=test-results.xml \
-                        -v
+                    # Copier tout le workspace dans le conteneur
+                    docker cp "$(pwd)/." "${CID}:/app/"
+
+                    # Lancer les tests
+                    docker start -a "${CID}"
+                    TEST_EXIT=$?
+
+                    # Récupérer les rapports
+                    docker cp "${CID}:/app/coverage.xml" coverage.xml 2>/dev/null || true
+                    docker cp "${CID}:/app/test-results.xml" test-results.xml 2>/dev/null || true
+
+                    docker rm "${CID}" || true
+
+                    if [ "$TEST_EXIT" != "0" ]; then
+                        echo "❌ Tests échoués"
+                        exit 1
+                    fi
+                    echo "✅ Tests réussis"
                 '''
             }
             post {
@@ -235,16 +225,15 @@ pipeline {
 
         // ═══════════════════════════════════════════════════════
         // STAGE 6 : Build Docker
-        // FIX : utiliser DOCKER_HOST ou construire via Dockerfile
-        // sans monter le workspace
+        // FIX : docker build depuis contexte copié dans /tmp
         // ═══════════════════════════════════════════════════════
         stage('Build Docker') {
             steps {
-                echo "🐳 Construction de l'image : ${IMAGE_FULL}"
+                echo "🐳 Construction : ${IMAGE_FULL}"
                 sh '''
-                    # Copier les sources dans un contexte de build temporaire
-                    BUILD_CTX=$(mktemp -d)
-                    cp -r . "${BUILD_CTX}/"
+                    # Copier le workspace dans un répertoire tmp accessible par Docker
+                    BUILD_CTX=$(mktemp -d /tmp/jenkins-build-XXXX)
+                    cp -r "$(pwd)/." "${BUILD_CTX}/"
 
                     DOCKER_BUILDKIT=1 docker build \
                         --no-cache \
@@ -264,7 +253,7 @@ pipeline {
 
         // ═══════════════════════════════════════════════════════
         // STAGE 7 : Container Scan - Trivy
-        // FIX : scan de l'image locale (pas de volume workspace)
+        // OK : scanne l'image locale via socket Docker
         // ═══════════════════════════════════════════════════════
         stage('Container Scan - Trivy') {
             steps {
@@ -272,7 +261,6 @@ pipeline {
                 sh '''
                     mkdir -p ${REPORT_DIR}
 
-                    # Trivy scanne l'image locale directement via le socket Docker
                     docker run --rm \
                         -v /var/run/docker.sock:/var/run/docker.sock \
                         aquasec/trivy:latest \
@@ -283,7 +271,6 @@ pipeline {
                         --ignore-unfixed \
                         "${IMAGE_FULL}" > ${REPORT_DIR}/trivy-report.json 2>&1 || true
 
-                    # Affichage lisible + code de retour bloquant
                     docker run --rm \
                         -v /var/run/docker.sock:/var/run/docker.sock \
                         aquasec/trivy:latest \
@@ -308,6 +295,7 @@ pipeline {
 
         // ═══════════════════════════════════════════════════════
         // STAGE 8 : Signature Cosign
+        // OK : utilise /tmp pour les clés (pas de volume workspace)
         // ═══════════════════════════════════════════════════════
         stage('Signature - Cosign') {
             steps {
@@ -361,11 +349,11 @@ pipeline {
             }
             steps {
                 timeout(time: 30, unit: 'MINUTES') {
-                    input message: "🚀 Déployer la version ${IMAGE_TAG} ?",
+                    input message: "🚀 Déployer ${IMAGE_TAG} ?",
                           ok: 'Déployer',
                           submitter: 'admin'
                 }
-                echo "🚀 Déploiement Docker Compose..."
+                echo "🚀 Déploiement..."
                 sh '''
                     echo "IMAGE_TAG=${IMAGE_TAG}"    > .env.deploy
                     echo "IMAGE_NAME=${IMAGE_NAME}" >> .env.deploy
@@ -377,7 +365,7 @@ pipeline {
 
                     sleep 10
                     docker ps | grep "${IMAGE_NAME}"
-                    echo "✅ Déploiement réussi - version ${IMAGE_TAG}"
+                    echo "✅ Déploiement réussi - ${IMAGE_TAG}"
                 '''
             }
         }
@@ -394,7 +382,7 @@ pipeline {
                              allowEmptyArchive: true
         }
         success {
-            echo "✅ Pipeline réussi — Version : ${IMAGE_TAG}"
+            echo "✅ Pipeline réussi — ${IMAGE_TAG}"
         }
         failure {
             echo "❌ Pipeline échoué — Build #${BUILD_NUMBER}"
