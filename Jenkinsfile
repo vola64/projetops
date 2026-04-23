@@ -70,7 +70,7 @@ pipeline {
                         zricethezav/gitleaks:latest \
                         detect \
                         --source=/repo \
-                        --config=/repo/.gitleaks.toml \
+                        --config=/repo/gitleaks.toml \
                         --report-format=json \
                         --report-path=/repo/${REPORT_DIR}/gitleaks-report.json \
                         --redact --verbose
